@@ -19,6 +19,8 @@
   <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png"/>
   <link rel="icon" type="image/png" sizes="512x512" href="./icon-512.png"/>
   <title>پایش پرسنل ایمنی منطقه ۹</title>
+    <!-- Supabase Auth -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.8/dist/umd/supabase.js"></script>
   <script>try{document.documentElement.setAttribute("data-theme", localStorage.getItem("RIG_HSE_THEME_V1") || "dark");}catch(e){}</script>
   <style>
   /* ═══════════════════════════════════════════════
@@ -759,6 +761,52 @@
 </style>
 </head>
 <body>
+<!-- ═══════════════ AUTH OVERLAY ═══════════════ -->
+<div id="authOverlay" style="
+  position:fixed; inset:0; z-index:99999;
+  display:flex; align-items:center; justify-content:center;
+  background:var(--bg);
+">
+  <div style="
+    width:100%; max-width:400px; margin:20px;
+    background:var(--surface-1);
+    border:1px solid var(--border);
+    border-radius:var(--r-md);
+    padding:32px 28px;
+    box-shadow:var(--shadow-lg);
+  ">
+    <div style="text-align:center; margin-bottom:28px;">
+      <div style="font-size:32px; margin-bottom:8px;">🛡️</div>
+      <h2 style="margin:0; font-size:18px; font-weight:700; color:var(--text);">ورود به سامانه پایش HSE</h2>
+      <p style="margin:8px 0 0; font-size:13px; color:var(--text-muted);">لطفاً ایمیل و رمز عبور خود را وارد کنید</p>
+    </div>
+    <form id="loginForm">
+      <div class="field" style="margin-bottom:16px;">
+        <label style="display:block; color:var(--text-muted); font-size:12px; font-weight:600; margin-bottom:6px;">ایمیل</label>
+        <input type="email" id="loginEmail" required placeholder="name@example.com" style="direction:ltr; text-align:left;">
+      </div>
+      <div class="field" style="margin-bottom:24px;">
+        <label style="display:block; color:var(--text-muted); font-size:12px; font-weight:600; margin-bottom:6px;">رمز عبور</label>
+        <input type="password" id="loginPassword" required style="direction:ltr; text-align:left;">
+      </div>
+      <button type="submit" id="loginBtn" class="btn primary" style="width:100%; justify-content:center; font-size:15px; padding:13px; min-height:48px;">
+        ورود
+      </button>
+    </form>
+    <div id="loginError" style="
+      display:none; margin-top:14px;
+      background:var(--bad-dim);
+      border:1px solid rgba(251,113,133,.3);
+      border-radius:var(--r-xs);
+      padding:10px 14px;
+      color:var(--bad);
+      font-size:13px;
+      text-align:center;
+    "></div>
+  </div>
+</div>
+<!-- ══════════════════════════════════════════ -->
+
 <div id="errPanel" style="display:none; position:fixed; left:12px; right:12px; top:12px; z-index:99999; background:#3b0f13; color:#fff; padding:12px 14px; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.35); font-family:system-ui, sans-serif;">
   <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start;">
     <div>
@@ -4116,6 +4164,236 @@ try{ refreshSnapshotUI(); }catch(e){}
   window.addEventListener("online", updateOnlineUI);
   window.addEventListener("offline", updateOnlineUI);
   try{ window.__PAYESH_PWA_BUILD__ = APP_BUILD; }catch(e){}
+})();
+</script>
+
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// SUPABASE AUTH + RBAC
+// نقش‌ها:
+//   admin  → دسترسی کامل (رئیس منطقه)
+//   viewer → فقط مشاهده + پرینت (مدیریت)
+//   expert → فقط دکل خودش، ثبت عملکرد، گزارش، حوادث، پیگیری
+//            بدون: مرخصی، بکاپ
+// ═══════════════════════════════════════════════════════════════
+(function(){
+  'use strict';
+
+  const SUPA_URL = 'https://fdnyyuqmtiondsxtpwdm.supabase.co';
+  const SUPA_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZkbnl5dXFtdGlvbmRzeHRwd2RtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NDA4MzIsImV4cCI6MjA5NzQxNjgzMn0.q_rowpNNdqftYRykRDcSlErp5Ezoz1H3hlJlC-Yg3sE';
+
+  const _supa = supabase.createClient(SUPA_URL, SUPA_KEY);
+  let _user = null;
+  let _profile = null;
+
+  function showOverlay(){ document.getElementById('authOverlay').style.display = 'flex'; }
+  function hideOverlay(){ document.getElementById('authOverlay').style.display = 'none'; }
+
+  async function fetchProfile(userId){
+    const { data, error } = await _supa.from('profiles').select('*').eq('id', userId).single();
+    if(error || !data){
+      console.warn('[Auth] No profile:', error?.message);
+      return { role: 'viewer', rig_id: null };
+    }
+    return data;
+  }
+
+  // ── قفل کردن dropdown دکل برای expert ──────────────────────
+  function lockRigSelects(rig){
+    const IDS = ['rigSelect','schRig','enRig','repRig1','repRig2','repRig3','incRig','fuRig','lvRig','delRigFilter'];
+    IDS.forEach(id => {
+      const el = document.getElementById(id);
+      if(!el) return;
+      el.value = rig;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.disabled = true;
+      el.style.opacity = '0.7';
+    });
+    try{ window.currentRig = rig; }catch(e){}
+  }
+
+  // ── مخفی کردن تب ────────────────────────────────────────────
+  function hideTab(tabId){
+    document.querySelectorAll('[data-tab="' + tabId + '"]').forEach(el => el.style.display = 'none');
+    const sec = document.getElementById(tabId);
+    if(sec) sec.style.display = 'none';
+  }
+
+  // ── غیرفعال کردن دکمه‌ها ────────────────────────────────────
+  function disableEditButtons(){
+    const BTNS = [
+      '#saveRigBtn','#savePeopleBtn','#addRigBtn','#deleteRigBtn','#renameRigBtn',
+      '#genScheduleBtn','#clearScheduleBtn','#addOverrideBtn',
+      '#saveEntryBtn','#addTrainingBtn','#addDrillBtn','#addReqBtn','#addLetterBtn',
+      '#incAddBtn','#setPinBtn','#exportBtn','#wipeBtn','#forceSnapBtn','#clearSnapsBtn'
+    ];
+    BTNS.forEach(sel => {
+      const el = document.querySelector(sel);
+      if(!el) return;
+      el.disabled = true;
+      el.style.opacity = '0.35';
+      el.style.cursor = 'not-allowed';
+    });
+    // غیرفعال کردن تمام input/select/textarea
+    document.querySelectorAll('input:not(#loginEmail):not(#loginPassword), select, textarea').forEach(el => {
+      el.disabled = true;
+    });
+  }
+
+  // ── نمایش بج نقش در هدر ─────────────────────────────────────
+  function showUserBadge(role, rig){
+    let infoEl = document.getElementById('_authBadge');
+    if(!infoEl){
+      infoEl = document.createElement('div');
+      infoEl.id = '_authBadge';
+      infoEl.style.cssText = 'display:flex;align-items:center;gap:8px;flex-shrink:0;';
+      const ta = document.querySelector('.title-actions');
+      if(ta) ta.insertBefore(infoEl, ta.firstChild);
+    }
+    const labels = { admin:'رئیس منطقه', viewer:'مدیریت', expert:'کارشناس' + (rig?' · '+rig:'') };
+    const classes = { admin:'pill ok', viewer:'pill', expert:'pill warn' };
+    infoEl.innerHTML =
+      '<span class="' + (classes[role]||'pill') + '" style="font-size:11px;white-space:nowrap;">' +
+      (labels[role]||role) + '</span>' +
+      '<button class="btn ghost" onclick="window.__SUPA_LOGOUT__()" ' +
+      'style="padding:5px 10px;font-size:12px;min-height:30px;" title="خروج از سیستم">خروج</button>';
+  }
+
+  // ── اعمال نقش ───────────────────────────────────────────────
+  function applyRole(){
+    if(!_profile) return;
+    const role = _profile.role || 'viewer';
+    const rig  = _profile.rig_id || null;
+
+    showUserBadge(role, rig);
+
+    // ════ ADMIN: دسترسی کامل ════════════════════════════════
+    if(role === 'admin') return;
+
+    // ════ VIEWER: فقط مشاهده + پرینت ═══════════════════════
+    if(role === 'viewer'){
+      // مخفی کردن تب بکاپ
+      hideTab('tabBackup');
+      // غیرفعال کردن همه دکمه‌های ویرایش
+      disableEditButtons();
+      // دکمه‌های پرینت را دوباره فعال کن
+      setTimeout(()=>{
+        ['printBtn','incPrintBtn','fuPrintBtn','lvPrintBtn'].forEach(id=>{
+          const el = document.getElementById(id);
+          if(el){ el.disabled = false; el.style.opacity = '1'; el.style.cursor = 'pointer'; }
+        });
+      }, 800);
+      return;
+    }
+
+    // ════ EXPERT: فقط دکل خودش ══════════════════════════════
+    if(role === 'expert'){
+      // مخفی کردن تب‌های ممنوعه
+      hideTab('tabBackup');
+      hideTab('tabLeave');
+
+      // قفل کردن همه dropdown های دکل
+      if(rig){
+        // کمی صبر تا init() کامل شود
+        setTimeout(()=>{ lockRigSelects(rig); }, 700);
+        // دوباره بعد از ۲ ثانیه (برای اطمینان)
+        setTimeout(()=>{ lockRigSelects(rig); }, 2000);
+      }
+
+      // مخفی کردن دکمه‌های مدیریت دکل (اضافه/حذف/rename دکل)
+      ['addRigBtn','deleteRigBtn','renameRigBtn','addRigBtn',
+       'setPinBtn','exportBtn','wipeBtn','forceSnapBtn','clearSnapsBtn',
+       'genScheduleBtn','clearScheduleBtn','addOverrideBtn'
+      ].forEach(id=>{
+        const el = document.getElementById(id);
+        if(el){ el.style.display = 'none'; }
+      });
+
+      // تب دکل (rigSelect + اطلاعات دکل) را read-only کن
+      setTimeout(()=>{
+        ['rigSelect','rigLoc','rigNote','rigNameEdit','newRigName',
+         'rigChiefTool','rigChiefTool2','rigRegionChief','rigServiceRegionChief','rigChiefOps','rigManagerOps'
+        ].forEach(id=>{
+          const el = document.getElementById(id);
+          if(el && id !== 'rigSelect'){ el.disabled = true; el.style.opacity='0.6'; }
+        });
+        // دکمه‌های ذخیره دکل
+        ['saveRigBtn','resetRigBtn','savePeopleBtn'].forEach(id=>{
+          const el = document.getElementById(id);
+          if(el){ el.disabled = true; el.style.opacity='0.35'; el.style.cursor='not-allowed'; }
+        });
+      }, 800);
+
+      return;
+    }
+  }
+
+  // ── فرم لاگین ────────────────────────────────────────────────
+  document.getElementById('loginForm').addEventListener('submit', async function(e){
+    e.preventDefault();
+    const email    = document.getElementById('loginEmail').value.trim();
+    const password = document.getElementById('loginPassword').value;
+    const errEl    = document.getElementById('loginError');
+    const btn      = document.getElementById('loginBtn');
+
+    errEl.style.display = 'none';
+    btn.disabled = true;
+    btn.textContent = 'در حال ورود...';
+
+    try {
+      const { data, error } = await _supa.auth.signInWithPassword({ email, password });
+      if(error) throw error;
+      _user    = data.user;
+      _profile = await fetchProfile(_user.id);
+      hideOverlay();
+      applyRole();
+    } catch(err){
+      console.error('[Auth]', err);
+      let msg = 'ایمیل یا رمز عبور اشتباه است';
+      if(err.message && err.message.includes('Invalid login')) msg = 'ایمیل یا رمز عبور اشتباه است';
+      else if(err.message) msg = err.message;
+      errEl.textContent = '⚠️ ' + msg;
+      errEl.style.display = 'block';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'ورود';
+    }
+  });
+
+  // ── خروج ─────────────────────────────────────────────────────
+  window.__SUPA_LOGOUT__ = async function(){
+    await _supa.auth.signOut();
+    _user = null; _profile = null;
+    const b = document.getElementById('_authBadge');
+    if(b) b.remove();
+    // فعال کردن مجدد همه چیز قبل از نشون دادن لاگین
+    document.querySelectorAll('input, select, textarea, button').forEach(el=>{
+      el.disabled = false; el.style.opacity=''; el.style.cursor='';
+    });
+    document.querySelectorAll('[data-tab]').forEach(el=>el.style.display='');
+    showOverlay();
+  };
+
+  // ── بررسی session موجود ──────────────────────────────────────
+  async function checkSession(){
+    try {
+      const { data: { session } } = await _supa.auth.getSession();
+      if(session){
+        _user    = session.user;
+        _profile = await fetchProfile(_user.id);
+        hideOverlay();
+        applyRole();
+      }
+    } catch(e){
+      console.warn('[Auth] Session check failed:', e.message);
+    }
+  }
+
+  window.addEventListener('load', function(){
+    setTimeout(checkSession, 700);
+  });
+
 })();
 </script>
 
